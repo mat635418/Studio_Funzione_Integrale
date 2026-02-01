@@ -7,13 +7,27 @@ from PIL import Image
 import re
 import warnings
 import io
+import os
 
-# OCR locale
-try:
-    from pix2tex.cli import LatexOCR
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+# OCR locale con gestione permissione
+@st.cache_resource
+def load_ocr_model():
+    try:
+        from pix2tex.cli import LatexOCR
+        return LatexOCR()
+    except ImportError:
+        st.warning("Modello OCR pix2tex non disponibile. Installa con `pip install pix2tex`.")
+        return None
+    except PermissionError:
+        st.error("Il modello OCR non può essere caricato in questo ambiente a causa di problemi di permessi. Prova in locale.")
+        return None
+    except Exception as e:
+        st.error(f"Errore imprevisto nel caricamento OCR: {e}")
+        return None
+
+# Inizializzazione OCR Model
+ocr_model = load_ocr_model()
+OCR_AVAILABLE = ocr_model is not None
 
 st.set_page_config(page_title="Studio Integrale Local OCR+", layout="wide")
 warnings.filterwarnings('ignore')
@@ -21,12 +35,10 @@ warnings.filterwarnings('ignore')
 # --- Funzione migliorata per parsing LaTeX ---
 def latex_to_python_manual(latex_str):
     s = latex_str
-
-    # Estrazione variabile usata nell'integrale (\, lettere, ...)
+    # Estrazione variabile usata nell'integrale
     var_match = re.search(r'd([a-zA-Z])', s)
     variable = var_match.group(1) if var_match else 't'
 
-    # Estrazione limiti integrale
     start_point, end_point = 0.0, 'x'
     try:
         match_limits = re.search(r"\\int_\{([^\}]+)\}\^\{([^\}]+)\}", s)
@@ -41,15 +53,12 @@ def latex_to_python_manual(latex_str):
     except:
         pass
 
-    # Elimina \int_...^{...}
-    s = re.sub(r"\\int_[^{]*\{[^\}]+\}\^\{[^\}]+\}", "", s)   # caso \int_{..}^{..}
-    s = re.sub(r"\\int_[^\^]+\^\{[^\}]+\}", "", s)            # altro caso simile
+    s = re.sub(r"\\int_[^{]*\{[^\}]+\}\^\{[^\}]+\}", "", s)
+    s = re.sub(r"\\int_[^\^]+\^\{[^\}]+\}", "", s)
     s = re.sub(r"\\int", "", s)
     s = re.sub(r"d"+variable+"$", "", s).strip()
-
     while "\\frac" in s:
         s = re.sub(r"\\frac\{(.+?)\}\{(.+?)\}", r"(\1)/(\2)", s)
-    # Funzioni
     s = s.replace(r"\sqrt", "sqrt")
     s = s.replace(r"\ln", "log")
     s = s.replace(r"\log", "log")
@@ -58,7 +67,6 @@ def latex_to_python_manual(latex_str):
     s = s.replace("^", "**")
     s = s.replace("{", "(").replace("}", ")")
     s = s.replace("\\", "")
-
     return s.strip(), variable, start_point, end_point
 
 # --- CLASSE ANALYZER migliorata ---
@@ -68,7 +76,6 @@ class IntegralAnalyzer:
         self.t = sp.symbols(variable)
         self.func_str = func_str
         self.error = None
-        # Symbolic
         try:
             self.f_expr = sp.sympify(func_str)
             self.f_numeric = sp.lambdify(self.t, self.f_expr, modules=['numpy'])
@@ -95,15 +102,6 @@ class IntegralAnalyzer:
                 ys.append(np.nan)
         return xs, np.array(ys)
 
-# --- CACHING OCR model ---
-@st.cache_resource
-def load_ocr_model():
-    if OCR_AVAILABLE:
-        return LatexOCR()
-    return None
-
-ocr_model = load_ocr_model()
-
 # --- FUNZIONI ESPORTAZIONE ---
 def download_plot(fig):
     buf = io.BytesIO()
@@ -120,7 +118,10 @@ def latex_to_pdf(latex_code, filename="formula.pdf"):
     pdf.savefig(fig)
     pdf.close()
     plt.close(fig)
-    return filename
+    with open(filename, "rb") as f:  # Da qui in poi non ci sono problemi di permesso temporanei
+        content = f.read()
+    os.remove(filename)  # rimuove il file temporaneo
+    return content
 
 # ------------------- UI -------------------
 st.title("📚 Studio Integrale - OCR & Calcolo Symbolico")
@@ -137,9 +138,9 @@ if 'x1_input' not in st.session_state: st.session_state['x1_input'] = 2.0
 with st.sidebar:
     st.header("📸 1. Scanner Formula/OCR")
     if not OCR_AVAILABLE:
-        st.error("Libreria 'pix2tex' non trovata. Installa con `pip install pix2tex`")
+        st.warning("OCR non disponibile oppure impossibile da caricare in questa piattaforma.<br>Funziona solo con installazione locale e permessi adeguati.<br>Puoi comunque inserire la formula a mano!", unsafe_allow_html=True)
     else:
-        uploaded_file = st.file_uploader("Carica immagine formula (possibilmente in stampa)", type=["png", "jpg", "jpeg"])
+        uploaded_file = st.file_uploader("Carica immagine formula (leggibile)", type=["png", "jpg", "jpeg"])
         if uploaded_file is not None and st.button("Analizza Immagine"):
             with st.spinner("Decodifica LaTeX in corso..."):
                 try:
@@ -169,16 +170,14 @@ with st.sidebar:
     st.divider()
     st.header("ℹ️ Tutorial & Aiuto rapido")
     st.markdown("""
-- **OCR**: scegli un'immagine con una formula LaTeX leggibile.
-- **Correggi eventuali errori**: a volte l'OCR sbaglia parentesi! Ricontrolla la funzione e la variabile.
-- **Puoi modificare formula, variabile e limiti manualmente.**
+- **OCR**: scegli un'immagine con una formula LaTeX leggibile (solo in locale con permessi!).
+- **Puoi comunque modificare formula, variabile e limiti manualmente.**
 - **Cosa puoi fare**:
-    - Vedere: primitiva simbolica, derivata della funzione, integrale numerico tra due punti
-    - Visualizzare aree colorate tra due punti scelti
+    - Vedere: primitiva simbolica, derivata, integrale definito
+    - Visualizzare aree sulla primitiva
     - Scaricare grafici/risultati
-- **Se ottieni errori**: assicurati che la sintassi sia giusta, che la variabile usata sia la stessa ovunque, e che non ci siano lettere strane (es: “𝑡” vs “t”).
+- **Se ottieni errori**: controlla che la variabile sia la stessa ovunque (ad es. solo `t` o `x`).
 - **Esempio formula**: `\\int_{1}^{x} \\frac{\\ln(t)}{t\\,(t-1)}dt`
-- Powered by Python/SymPy/Streamlit
 """)
 
 # ------------- SEZIONE PRINCIPALE -------------
@@ -199,15 +198,14 @@ if func_input:
             st.latex(r"\int " + sp.latex(analyzer.f_expr) + " d"+analyzer.variable_name +
                      r" = " + sp.latex(analyzer.f_primitive) + " + C")
 
-        # Mostra primitiva calcolata anche con pretty-print (step simbolico)
+        # Passaggi simbolici (espanso se serve)
         with st.expander("Passaggi simbolici (SymPy)", expanded=False):
             st.write("**Forma step-by-step (primitiva):**")
             st.code(sp.pretty(analyzer.f_primitive), language='python')
 
-        # Calcolo integrale definito tra x0 e x1
+        # Calcolo definito (simbolico e numerico)
         st.subheader("Risultato Integrale Definito")
         try:
-            # Valore simbolico se possibile
             F_sym = analyzer.f_primitive
             F_num_x1 = F_sym.subs(analyzer.t, x1)
             F_num_x0 = F_sym.subs(analyzer.t, x0)
@@ -217,12 +215,10 @@ if func_input:
         except Exception:
             st.write("Non è stato possibile calcolare il valore simbolico.")
 
-        # Calcolo numerico
         num_val, err_val = analyzer.compute_numeric_integral(x0, x1)
         if num_val is not None:
             st.success(f"Valore numerico approssimato: **{num_val:.6f}**  ± {err_val:.2g}")
 
-        # --- GRAFICO E AREAS (funzionalità avanzate)
         xs, ys = analyzer.compute_data(x0, (xmin, xmax))
         fig, ax = plt.subplots(figsize=(10, 5))
         mask = ~np.isnan(ys)
@@ -236,12 +232,11 @@ if func_input:
         ax.legend()
         st.pyplot(fig)
 
-        # Download pulsanti
         plot_bytes = download_plot(fig)
         st.download_button(label="📥 Scarica grafico PNG", data=plot_bytes,
                            file_name="integrale.png", mime="image/png")
         st.download_button(label="📥 Scarica formula LaTeX (PDF)", 
-                           data=open(latex_to_pdf(sp.latex(analyzer.f_expr)), "rb").read(),
+                           data=latex_to_pdf(sp.latex(analyzer.f_expr)),
                            file_name="funzione.pdf", mime="application/pdf")
 
 # (Opzionale) Modalità Allenamento/Quiz
